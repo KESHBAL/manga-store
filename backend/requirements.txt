@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg[binary]
+pyjwt
+bcrypt
+python-dotenv
+faker
