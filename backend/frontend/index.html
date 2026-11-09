@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kagayaku kin'yōbi</title>
+  <link rel="stylesheet" href="style.css?v=3">
+  <link rel="icon" href="/img/steel-ball.png">
+</head>
+<body>
+  <header>
+    <div class="bar">
+      <a class="logo" href="/">Kagayaku<span>kin'yōbi</span></a>
+      <nav>
+        <button data-view="catalog">Каталог</button>
+        <button data-view="favs" class="need-auth">Избранное</button>
+        <button data-view="cart" class="need-auth">Корзина <i id="cartCount">0</i></button>
+        <button data-view="orders" class="need-auth">Заказы</button>
+        <button id="addProductBtn" class="admin-only" data-act="new">+ Товар</button>
+        <button id="loginBtn" class="accent" data-act="auth">Войти</button>
+        <button id="logoutBtn" class="accent" data-act="logout">Выйти</button>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section id="v-catalog">
+      <aside class="filters">
+        <h3>Фильтры</h3>
+        <label>Поиск<input id="q" placeholder="Название или автор"></label>
+        <label>Жанр<select id="genre"><option value="">Все жанры</option></select></label>
+        <label>Автор<input id="author" placeholder="Например, Миура"></label>
+        <label>Цена, ₸
+          <div class="two"><input id="pmin" type="number" min="0" placeholder="от"><input id="pmax" type="number" min="0" placeholder="до"></div>
+        </label>
+        <label>Сортировка
+          <select id="sort">
+            <option value="new">Сначала новые</option>
+            <option value="price_asc">Сначала дешёвые</option>
+            <option value="price_desc">Сначала дорогие</option>
+            <option value="title">По названию</option>
+          </select>
+        </label>
+        <button class="ghost" id="reset">Сбросить</button>
+      </aside>
+      <div class="content">
+        <p id="total" class="muted"></p>
+        <div id="grid" class="grid"></div>
+        <div id="pager" class="pager"></div>
+      </div>
+    </section>
+
+    <section id="v-favs" hidden><h2>Избранное</h2><div id="favGrid" class="grid"></div></section>
+    <section id="v-cart" hidden><h2>Корзина</h2><div id="cartBox"></div></section>
+    <section id="v-orders" hidden><h2>Мои заказы</h2><div id="ordersBox"></div></section>
+  </main>
+
+  <div id="modal" class="modal" hidden><div class="box" id="modalBox"></div></div>
+  <div id="toast"></div>
+  <script src="app.js?v=3"></script>
+</body>
+</html>
