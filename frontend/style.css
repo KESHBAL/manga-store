@@ -85,7 +85,37 @@ input:focus, select:focus, textarea:focus { outline:none; border-color:var(--red
   .detail { grid-template-columns:1fr; }
 }
 
+/* загрузка обложки в форме товара */
+.coverField { margin-bottom:12px; }
+.coverField .lbl { display:block; font-size:13px; font-weight:700; margin-bottom:4px; }
+.coverPick { display:flex; gap:12px; align-items:center; }
+.coverPrev { width:90px; aspect-ratio:3/4; flex:none; background:var(--dark); border:2px solid var(--line); display:flex; align-items:center; justify-content:center; color:#999; font-size:12px; overflow:hidden; }
+.coverPrev img { width:100%; height:100%; object-fit:cover; }
+.coverPick small { display:block; margin-top:6px; color:#666; font-size:12px; }
+.btn:disabled { background:#aaa; cursor:not-allowed; }
+
+/* оценки и комментарии */
+.box.wide { max-width:680px; }
+.reviews { margin-top:22px; border-top:3px solid var(--line); padding-top:14px; }
+.reviews h4 { text-transform:uppercase; margin:16px 0 10px; }
+.avg { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+.avg .big { font-size:34px; font-weight:900; }
+.starsRow, .stars { color:var(--red); font-weight:700; letter-spacing:2px; }
+.rate { margin:8px 0; font-weight:700; }
+.star { border:none; background:none; font-size:26px; line-height:1; color:#bbb; padding:0 2px; }
+.star.on, .star:hover { color:var(--red); }
+.link { background:none; border:none; color:var(--red); font-weight:700; text-decoration:underline; padding:0; }
+.muted2 { color:#666; font-size:12px; }
+.cm { border:2px solid var(--line); background:var(--white); padding:10px; margin-bottom:8px; }
+.cm.reply { margin-left:28px; background:var(--paper); border-color:#999; }
+.cmHead { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.cmText { white-space:pre-wrap; overflow-wrap:anywhere; margin:6px 0; }
+.cmAct button { background:none; border:none; color:var(--red); font-weight:700; font-size:13px; padding:0 12px 0 0; }
+.tag { background:var(--red); color:var(--white); font-size:11px; font-weight:700; padding:1px 6px; }
+.cmForm { margin-top:12px; }
+.cmForm textarea { resize:vertical; }
+
 /* плашка роли в шапке */
 .role { align-self:center; padding:6px 12px; font-size:13px; font-weight:700; border:2px solid var(--white); color:var(--white); max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .role.guest { opacity:.6; }
-.role.admin { background:var(--white); color:var(--red); border-color:var(--red); }
+.role.admin, .role.mangaka { background:var(--white); color:var(--red); border-color:var(--red); }

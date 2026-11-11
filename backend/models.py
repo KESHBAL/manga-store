@@ -1,5 +1,5 @@
 import datetime as dt
-from sqlalchemy import String, Integer, ForeignKey, DateTime, Text
+from sqlalchemy import String, Integer, ForeignKey, DateTime, Text, LargeBinary
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -30,10 +30,38 @@ class Product(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow, index=True)
 
 
+class Cover(Base):
+    """Загруженная обложка: сама картинка хранится в базе (Neon), а в товаре лежит адрес /api/covers/<id>."""
+    __tablename__ = "covers"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    content_type: Mapped[str] = mapped_column(String(30))
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow)
+
+
 class Favorite(Base):
     __tablename__ = "favorites"
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), primary_key=True)
+
+
+class Rating(Base):
+    """Оценка манги от 1 до 5: один пользователь может поставить только одну оценку на товар (можно изменить)."""
+    __tablename__ = "ratings"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), primary_key=True, index=True)
+    value: Mapped[int] = mapped_column(Integer)
+
+
+class Comment(Base):
+    """Комментарий к манге. Если parent_id заполнен, это ответ на другой комментарий."""
+    __tablename__ = "comments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("comments.id", ondelete="CASCADE"), index=True, default=None)
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow)
 
 
 class CartItem(Base):

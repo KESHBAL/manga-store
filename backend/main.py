@@ -1,14 +1,17 @@
 import os
-from fastapi import FastAPI, Depends, HTTPException, Query
+import re
+import datetime as dt
+from urllib.parse import unquote
+from fastapi import FastAPI, Depends, HTTPException, Query, UploadFile, File, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, func, delete, desc, or_
 from sqlalchemy.orm import Session
 
 from database import engine, get_db
-from models import Base, User, Product, Favorite, CartItem, Order, OrderItem
+from models import Base, User, Product, Favorite, CartItem, Order, OrderItem, Cover, Rating, Comment
 from genres import GENRES
-from auth import hash_password, check_password, make_token, current_user, admin_only
+from auth import hash_password, check_password, make_token, current_user, admin_only, bearer
 
 Base.metadata.create_all(engine)  # создаёт таблицы в БД, если их ещё нет
 app = FastAPI(title="Manga Store")
@@ -47,6 +50,32 @@ def card(p: Product) -> dict:
     """Лёгкая карточка для списков: БЕЗ длинного описания (так список грузится быстрее)."""
     return {"id": p.id, "title": p.title, "author": p.author, "price": p.price,
             "stock": p.stock, "cover_url": p.cover_url, "genre": p.genre, "volume": p.volume}
+
+
+def rating_map(db: Session, ids: list[int]) -> dict:
+    """Средняя оценка и число оценок для набора товаров одним запросом: {id: (средняя, количество)}."""
+    if not ids:
+        return {}
+    rows = db.execute(select(Rating.product_id, func.avg(Rating.value), func.count())
+                      .where(Rating.product_id.in_(ids)).group_by(Rating.product_id)).all()
+    return {pid: (round(float(a), 1), n) for pid, a, n in rows}
+
+
+def with_rating(items: list[dict], db: Session) -> list[dict]:
+    m = rating_map(db, [i["id"] for i in items])
+    for i in items:
+        i["rating"], i["rating_count"] = m.get(i["id"], (0, 0))
+    return items
+
+
+def optional_user(cred=Depends(bearer), db: Session = Depends(get_db)) -> User | None:
+    """Пользователь, если он вошёл, иначе None (читать комментарии можно и гостям)."""
+    if not cred:
+        return None
+    try:
+        return current_user(cred, db)
+    except HTTPException:
+        return None
 
 
 def get_product(db: Session, pid: int) -> Product:
@@ -141,13 +170,14 @@ def products(
         .offset((page - 1) * per_page).limit(per_page)
     ).all()
     pages = max(1, -(-total // per_page))
-    return {"items": [card(p) for p in rows], "total": total, "page": page, "pages": pages}
+    return {"items": with_rating([card(p) for p in rows], db), "total": total, "page": page, "pages": pages}
 
 
 @app.get("/api/products/{pid}")
 def product_detail(pid: int, db: Session = Depends(get_db)):
     p = get_product(db, pid)
-    return {**card(p), "description": p.description}  # полное описание грузится только при открытии товара
+    avg, n = rating_map(db, [p.id]).get(p.id, (0, 0))
+    return {**card(p), "description": p.description, "rating": avg, "rating_count": n}  # описание грузится только при открытии товара
 
 
 # ---------- товары: только администратор ----------
@@ -173,7 +203,178 @@ def delete_product(pid: int, db: Session = Depends(get_db), _: User = Depends(ad
     p = get_product(db, pid)
     db.execute(delete(Favorite).where(Favorite.product_id == pid))
     db.execute(delete(CartItem).where(CartItem.product_id == pid))
+    db.execute(delete(Comment).where(Comment.product_id == pid))
+    db.execute(delete(Rating).where(Rating.product_id == pid))
     db.delete(p)
+    db.commit()
+    return {"ok": True}
+
+
+# ---------- обложки: администратор и мангака ----------
+def staff_only(user: User = Depends(current_user)) -> User:
+    """Админ или мангака. Мангаке доступны ТОЛЬКО обложки: создание, правка и удаление товаров остаются за admin_only."""
+    if user.role not in ("admin", "mangaka"):
+        raise HTTPException(403, "Только для администратора или мангаки")
+    return user
+
+
+IMG_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend", "img")  # старые обложки, лежащие файлами
+MAX_COVER_SIZE = 5 * 1024 * 1024  # 5 МБ
+COVER_URL_RE = re.compile(r"^/api/covers/(\d+)$")
+
+
+def detect_image_type(data: bytes) -> str | None:
+    """Определяем формат по содержимому файла, а не по имени: переименованный .exe не пройдёт."""
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+@app.post("/api/upload-cover")
+async def upload_cover(file: UploadFile = File(...), db: Session = Depends(get_db), _: User = Depends(staff_only)):
+    data = await file.read(MAX_COVER_SIZE + 1)
+    if len(data) > MAX_COVER_SIZE:
+        raise HTTPException(400, "Файл слишком большой (максимум 5 МБ)")
+    ctype = detect_image_type(data)
+    if not ctype:
+        raise HTTPException(400, "Нужна картинка JPG, PNG или WEBP")
+    cover = Cover(content_type=ctype, data=data)  # картинка сохраняется прямо в базе
+    db.add(cover)
+    db.commit()
+    return {"cover_url": f"/api/covers/{cover.id}"}
+
+
+@app.get("/api/covers/{cid}")
+def get_cover(cid: int, db: Session = Depends(get_db)):
+    """Отдаёт картинку из базы. Номер никогда не получает другую картинку, поэтому браузер может хранить её долго."""
+    c = db.get(Cover, cid)
+    if not c:
+        raise HTTPException(404, "Обложка не найдена")
+    return Response(content=c.data, media_type=c.content_type,
+                    headers={"Cache-Control": "public, max-age=31536000, immutable",
+                             "X-Content-Type-Options": "nosniff"})
+
+
+class CoverIn(BaseModel):
+    cover_url: str = Field(min_length=1, max_length=500)
+
+    @field_validator("cover_url")
+    @classmethod
+    def cover_must_be_ours(cls, v):
+        if COVER_URL_RE.match(v):  # картинка из базы (существование проверяется в set_cover)
+            return v
+        # старые обложки-файлы из frontend/img: внешние ссылки и пути вида /img/../ не пройдут
+        name = unquote(v[len("/img/"):]) if v.startswith("/img/") else ""
+        if not name or "/" in name or "\\" in name or ".." in name or not os.path.isfile(os.path.join(IMG_DIR, name)):
+            raise ValueError("Выберите картинку, загруженную через сайт")
+        return v
+
+
+@app.patch("/api/products/{pid}/cover")
+def set_cover(pid: int, data: CoverIn, db: Session = Depends(get_db), _: User = Depends(staff_only)):
+    """Меняет у товара только обложку, больше ничего."""
+    p = get_product(db, pid)
+    m = COVER_URL_RE.match(data.cover_url)
+    if m and not db.get(Cover, int(m.group(1))):
+        raise HTTPException(400, "Такой обложки нет, загрузите файл заново")
+    p.cover_url = data.cover_url
+    db.commit()
+    return card(p)
+
+
+# ---------- оценки и комментарии ----------
+class RatingIn(BaseModel):
+    value: int = Field(ge=1, le=5)
+
+
+class CommentIn(BaseModel):
+    text: str = Field(min_length=1, max_length=1000)
+    parent_id: int | None = None
+
+    @field_validator("text")
+    @classmethod
+    def not_blank(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("Напишите комментарий")
+        return v
+
+
+def public_name(u: User) -> str:
+    """В комментариях показываем только часть email до @, чтобы не раскрывать адреса читателей."""
+    return u.email.split("@")[0]
+
+
+def review_info(db: Session, pid: int, me: User | None) -> dict:
+    avg, n = rating_map(db, [pid]).get(pid, (0, 0))
+    mine = db.get(Rating, (me.id, pid)) if me else None
+    return {"avg": avg, "count": n, "my": mine.value if mine else None}
+
+
+@app.get("/api/products/{pid}/reviews")
+def reviews(pid: int, db: Session = Depends(get_db), me: User | None = Depends(optional_user)):
+    get_product(db, pid)
+    rows = db.execute(
+        select(Comment, User).join(User, User.id == Comment.user_id)
+        .where(Comment.product_id == pid).order_by(Comment.created_at, Comment.id).limit(500)
+    ).all()
+    comments = [{"id": c.id, "parent_id": c.parent_id, "user": public_name(u), "role": u.role, "text": c.text,
+                 "created_at": c.created_at.isoformat() + "Z",
+                 "can_delete": bool(me and (me.id == c.user_id or me.role == "admin"))} for c, u in rows]
+    return {**review_info(db, pid, me), "comments": comments}
+
+
+@app.post("/api/products/{pid}/rating")
+def set_rating(pid: int, data: RatingIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    get_product(db, pid)
+    r = db.get(Rating, (user.id, pid))
+    if r:
+        r.value = data.value  # оценку можно изменить, но она всегда одна
+    else:
+        db.add(Rating(user_id=user.id, product_id=pid, value=data.value))
+    db.commit()
+    return review_info(db, pid, user)
+
+
+@app.delete("/api/products/{pid}/rating")
+def remove_rating(pid: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    db.execute(delete(Rating).where(Rating.user_id == user.id, Rating.product_id == pid))
+    db.commit()
+    return review_info(db, pid, user)
+
+
+@app.post("/api/products/{pid}/comments")
+def add_comment(pid: int, data: CommentIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    get_product(db, pid)
+    parent_id = None
+    if data.parent_id:
+        parent = db.get(Comment, data.parent_id)
+        if not parent or parent.product_id != pid:
+            raise HTTPException(400, "Комментарий, на который вы отвечаете, не найден")
+        parent_id = parent.parent_id or parent.id  # ответ на ответ тоже попадает в ветку главного комментария
+    # защита от спама: не больше 5 комментариев в минуту с одного аккаунта
+    since = dt.datetime.utcnow() - dt.timedelta(seconds=60)
+    recent = db.scalar(select(func.count()).select_from(Comment).where(Comment.user_id == user.id, Comment.created_at > since))
+    if recent >= 5:
+        raise HTTPException(429, "Слишком часто. Подождите минуту")
+    db.add(Comment(product_id=pid, user_id=user.id, parent_id=parent_id, text=data.text))
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/comments/{cid}")
+def delete_comment(cid: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    c = db.get(Comment, cid)
+    if not c:
+        raise HTTPException(404, "Комментарий не найден")
+    if c.user_id != user.id and user.role != "admin":
+        raise HTTPException(403, "Удалить можно только свой комментарий")
+    db.execute(delete(Comment).where(Comment.parent_id == cid))  # вместе с комментарием удаляются ответы на него
+    db.delete(c)
     db.commit()
     return {"ok": True}
 
@@ -183,7 +384,7 @@ def delete_product(pid: int, db: Session = Depends(get_db), _: User = Depends(ad
 def favorites(db: Session = Depends(get_db), user: User = Depends(current_user)):
     rows = db.scalars(select(Product).join(Favorite, Favorite.product_id == Product.id)
                       .where(Favorite.user_id == user.id).order_by(Product.title)).all()
-    return [card(p) for p in rows]
+    return with_rating([card(p) for p in rows], db)
 
 
 @app.post("/api/favorites/{pid}")

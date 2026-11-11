@@ -40,6 +40,20 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
+// загрузка файла обложки (отдельный запрос: тут не JSON, а файл, поэтому Content-Type ставит сам браузер)
+async function uploadCover(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch(API + "/upload-cover", {
+    method: "POST", headers: token ? { Authorization: "Bearer " + token } : {}, body: fd,
+  });
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    throw new Error(errText(e.detail));
+  }
+  return res.json();
+}
+
 let toastTimer;
 function toast(msg) {
   const t = $("#toast");
@@ -66,7 +80,7 @@ function renderNav() {
   }
   const role = me ? me.role : "guest";
   badge.className = "role " + role;
-  badge.textContent = !me ? "Гость" : (me.role === "admin" ? "★ Админ · " : "Пользователь · ") + me.email;
+  badge.textContent = !me ? "Гость" : (me.role === "admin" ? "★ Админ · " : me.role === "mangaka" ? "✎ Мангака · " : "Пользователь · ") + me.email;
 }
 
 function showView(name) {
@@ -93,15 +107,17 @@ function coverHtml(p) {
 
 function cardHtml(p) {
   const admin = me && me.role === "admin";
+  const mangaka = me && me.role === "mangaka";
   return `<article class="card">
     <div class="cover" data-act="open" data-id="${p.id}">${coverHtml(p)}</div>
     <div class="info">
       <h3>${esc(p.title)}</h3>
-      <div class="author">${esc(p.author)} · том ${p.volume}<br>${esc(p.genre)}</div>
+      <div class="author">${esc(p.author)} · том ${p.volume}<br>${esc(p.genre)}${p.rating_count ? `<br><span class="stars">★ ${p.rating.toFixed(1)}</span> <span class="muted2">(${p.rating_count})</span>` : ""}</div>
       <div class="row"><span class="price">${money(p.price)}</span>
         <button class="fav ${favIds.has(p.id) ? "on" : ""}" data-act="fav" data-id="${p.id}" title="В избранное">♥</button></div>
       <button class="buy" data-act="add" data-id="${p.id}" ${p.stock < 1 ? "disabled" : ""}>${p.stock < 1 ? "Нет в наличии" : "В корзину"}</button>
-      ${admin ? `<div class="adm"><button data-act="edit" data-id="${p.id}">Изменить</button><button data-act="del" data-id="${p.id}">Удалить</button></div>` : ""}
+      ${admin ? `<div class="adm"><button data-act="edit" data-id="${p.id}">Изменить</button><button data-act="del" data-id="${p.id}">Удалить</button></div>`
+        : mangaka ? `<div class="adm"><button data-act="cover" data-id="${p.id}">Сменить обложку</button></div>` : ""}
     </div></article>`;
 }
 
@@ -192,8 +208,18 @@ async function loadOrders() {
 }
 
 // ---------- модальные окна ----------
-function openModal(html) { $("#modalBox").innerHTML = html; $("#modal").hidden = false; }
-function closeModal() { $("#modal").hidden = true; }
+function openModal(html, wide = false) {
+  $("#modalBox").className = "box" + (wide ? " wide" : "");
+  $("#modalBox").innerHTML = html;
+  $("#modal").hidden = false;
+}
+function closeModal() {
+  $("#modal").hidden = true;
+  if (ratingsChanged) {  // оценку поменяли в окне товара: обновляем звёзды на карточках
+    ratingsChanged = false;
+    if (view === "catalog") loadCatalog(); else if (view === "favs") loadFavs();
+  }
+}
 $("#modal").addEventListener("click", e => { if (e.target.id === "modal") closeModal(); });
 
 function openAuth(mode = "login") {
@@ -233,7 +259,9 @@ async function openProduct(id) {
     <p class="price" style="margin:10px 0">${money(p.price)}</p>
     <p>${esc(p.description) || "Описания пока нет."}</p>
     <p class="muted" style="margin-top:10px">В наличии: ${p.stock} шт.</p></div></div>
-    <button class="btn" data-act="add" data-id="${p.id}" ${p.stock < 1 ? "disabled" : ""} style="margin-top:14px">В корзину</button>`);
+    <button class="btn" data-act="add" data-id="${p.id}" ${p.stock < 1 ? "disabled" : ""} style="margin-top:14px">В корзину</button>
+    <div id="reviewsBox" class="reviews">Загрузка…</div>`, true);
+  curPid = id; replyTo = null; loadReviews();
 }
 
 async function openProductForm(id) {
@@ -245,7 +273,18 @@ async function openProductForm(id) {
   openModal(`<button class="close" data-act="close">×</button><h3>${id ? "Изменить товар" : "Новый товар"}</h3>
     ${f("title", "Название")}${f("author", "Автор")}${genreSelect}
     <div class="two">${f("price", "Цена, ₸", "number")}${f("stock", "Остаток, шт.", "number")}${f("volume", "Том", "number")}</div>
-    ${f("cover_url", "Путь к обложке (например /img/berserk.jpg)")}
+    <div class="coverField">
+      <span class="lbl">Обложка</span>
+      <div class="coverPick">
+        <div class="coverPrev" id="coverPrev">${p.cover_url ? `<img src="${esc(p.cover_url)}" alt="">` : "нет"}</div>
+        <div>
+          <input id="f_cover_file" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+          <button type="button" class="ghost" data-act="pick-cover">Выбрать файл</button>
+          <small id="coverHint">JPG, PNG или WEBP, до 5 МБ</small>
+        </div>
+      </div>
+      <input id="f_cover_url" type="hidden" value="${esc(p.cover_url)}">
+    </div>
     <label>Описание<textarea id="f_description" rows="4" maxlength="3000">${esc(p.description)}</textarea></label>
     <div class="err" id="aErr"></div>
     <button class="btn" data-act="save" data-id="${id || ""}">Сохранить</button>`);
@@ -260,6 +299,108 @@ async function saveProduct(id) {
     closeModal(); toast("Сохранено"); await loadGenres(); loadCatalog();
   } catch (e) { $("#aErr").textContent = e.message; }
 }
+
+// ---------- оценки и комментарии ----------
+let curPid = null, replyTo = null, ratingsChanged = false;
+const stars = n => "★".repeat(n) + "☆".repeat(5 - n);
+const fmtDate = s => new Date(s).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
+const roleTag = r => r === "admin" ? ` <span class="tag">Админ</span>` : r === "mangaka" ? ` <span class="tag">Мангака</span>` : "";
+
+function commentHtml(c, isReply) {
+  return `<div class="cm ${isReply ? "reply" : ""}">
+    <div class="cmHead"><b>${esc(c.user)}</b>${roleTag(c.role)} <span class="muted2">${esc(fmtDate(c.created_at))}</span></div>
+    <p class="cmText">${esc(c.text)}</p>
+    <div class="cmAct">${me ? `<button data-act="reply" data-id="${c.id}" data-user="${esc(c.user)}">Ответить</button>` : ""}${c.can_delete ? `<button data-act="del-comment" data-id="${c.id}">Удалить</button>` : ""}</div></div>`;
+}
+
+async function loadReviews() {
+  const box = $("#reviewsBox");
+  if (!box) return;
+  let d;
+  try { d = await api("/products/" + curPid + "/reviews"); } catch (e) { box.textContent = e.message; return; }
+  const keep = $("#cmText") ? $("#cmText").value : "";  // не теряем недописанный комментарий при обновлении блока
+  const roots = d.comments.filter(c => !c.parent_id);
+  const list = roots.map(r => commentHtml(r, false) + d.comments.filter(c => c.parent_id === r.id).map(c => commentHtml(c, true)).join("")).join("");
+  const mine = me ? `<div class="rate">Ваша оценка: ${[1, 2, 3, 4, 5].map(i => `<button class="star ${d.my >= i ? "on" : ""}" data-act="rate" data-v="${i}" title="${i}">★</button>`).join("")}${d.my ? ` <button class="link" data-act="unrate">убрать</button>` : ""}</div>`
+    : `<p class="muted2">Войдите, чтобы оценить мангу и написать комментарий</p>`;
+  const form = me ? `<div class="cmForm">
+      ${replyTo ? `<div class="muted2">Ответ для ${esc(replyTo.user)} · <button class="link" data-act="cancel-reply">отмена</button></div>` : ""}
+      <textarea id="cmText" rows="3" maxlength="1000" placeholder="Ваш комментарий"></textarea>
+      <button class="btn" data-act="send-comment">Отправить</button></div>`
+    : `<button class="ghost" data-act="auth">Войти</button>`;
+  box.innerHTML = `<div class="avg"><span class="big">${d.count ? d.avg.toFixed(1) : "—"}</span>
+      <span class="starsRow">${d.count ? stars(Math.round(d.avg)) : ""}</span>
+      <span class="muted2">${d.count ? "оценок: " + d.count : "Пока нет оценок"}</span></div>
+    ${mine}
+    <h4>Комментарии (${d.comments.length})</h4>
+    ${list || `<p class="muted2">Комментариев пока нет. Будьте первым!</p>`}
+    ${form}`;
+  if ($("#cmText")) $("#cmText").value = keep;
+}
+
+async function sendComment() {
+  const t = $("#cmText").value.trim();
+  if (!t) { toast("Напишите комментарий"); return; }
+  await api(`/products/${curPid}/comments`, { method: "POST", body: { text: t, parent_id: replyTo ? replyTo.id : null } });
+  replyTo = null;
+  $("#cmText").value = "";
+  await loadReviews();
+  toast("Комментарий добавлен");
+}
+
+// окно мангаки: меняется только обложка, остальные поля товара ему недоступны
+async function openCoverForm(id) {
+  const p = await api("/products/" + id);
+  openModal(`<button class="close" data-act="close">×</button><h3>Обложка</h3>
+    <p class="author" style="margin-bottom:12px">${esc(p.title)} · том ${p.volume}</p>
+    <div class="coverField">
+      <div class="coverPick">
+        <div class="coverPrev" id="coverPrev">${p.cover_url ? `<img src="${esc(p.cover_url)}" alt="">` : "нет"}</div>
+        <div>
+          <input id="f_cover_file" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+          <button type="button" class="ghost" data-act="pick-cover">Выбрать файл</button>
+          <small id="coverHint">JPG, PNG или WEBP, до 5 МБ</small>
+        </div>
+      </div>
+      <input id="f_cover_url" type="hidden" value="${esc(p.cover_url)}">
+    </div>
+    <div class="err" id="aErr"></div>
+    <button class="btn" data-act="save-cover" data-id="${id}">Сохранить обложку</button>`);
+}
+
+async function saveCover(id) {
+  try {
+    await api("/products/" + id + "/cover", { method: "PATCH", body: { cover_url: $("#f_cover_url").value } });
+    closeModal(); toast("Обложка обновлена");
+    if (view === "favs") loadFavs(); else loadCatalog();
+  } catch (e) { $("#aErr").textContent = e.message; }
+}
+
+// после выбора файла: загружаем его на сервер, путь подставляется в форму сам
+document.addEventListener("change", async e => {
+  if (e.target.id !== "f_cover_file") return;
+  const input = e.target, file = input.files[0];
+  if (!file) return;
+  const urlField = $("#f_cover_url"), prev = $("#coverPrev"), hint = $("#coverHint"),
+    err = $("#aErr"), saveBtn = document.querySelector('[data-act="save"], [data-act="save-cover"]');
+  err.textContent = "";
+  if (file.size > 5 * 1024 * 1024) { err.textContent = "Файл больше 5 МБ"; input.value = ""; return; }
+  hint.textContent = "Загружаю…";
+  saveBtn.disabled = true;  // пока файл грузится, сохранить нельзя: иначе обложка потеряется
+  try {
+    const d = await uploadCover(file);
+    urlField.value = d.cover_url;
+    prev.innerHTML = `<img src="${esc(d.cover_url)}" alt="">`;
+    hint.textContent = "Загружено ✓ Теперь нажмите «Сохранить»";
+  } catch (ex) {
+    err.textContent = ex.message;
+    hint.textContent = "JPG, PNG или WEBP, до 5 МБ";
+    if (/войти|Сессия/.test(ex.message)) logout();
+  } finally {
+    saveBtn.disabled = false;
+    input.value = "";
+  }
+});
 
 // ---------- обработка всех кликов ----------
 document.addEventListener("click", async e => {
@@ -283,6 +424,28 @@ document.addEventListener("click", async e => {
       case "new": openProductForm(); break;
       case "edit": openProductForm(id); break;
       case "save": saveProduct(el.dataset.id); break;
+      case "pick-cover": $("#f_cover_file").click(); break;
+      case "cover": openCoverForm(id); break;
+      case "save-cover": saveCover(el.dataset.id); break;
+      case "rate":
+        await api(`/products/${curPid}/rating`, { method: "POST", body: { value: +el.dataset.v } });
+        ratingsChanged = true; await loadReviews(); break;
+      case "unrate":
+        await api(`/products/${curPid}/rating`, { method: "DELETE" });
+        ratingsChanged = true; await loadReviews(); break;
+      case "reply": {
+        replyTo = { id, user: el.dataset.user };
+        await loadReviews();
+        const t = $("#cmText");
+        if (!t.value) t.value = "@" + replyTo.user + ", ";
+        t.focus();
+        break;
+      }
+      case "cancel-reply": replyTo = null; await loadReviews(); break;
+      case "send-comment": await sendComment(); break;
+      case "del-comment":
+        if (confirm("Удалить комментарий?")) { await api("/comments/" + id, { method: "DELETE" }); await loadReviews(); }
+        break;
       case "del":
         if (confirm("Удалить товар?")) { await api("/products/" + id, { method: "DELETE" }); toast("Удалено"); loadGenres(); loadCatalog(); }
         break;
