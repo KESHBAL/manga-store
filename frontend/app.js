@@ -112,7 +112,7 @@ function cardHtml(p) {
     <div class="cover" data-act="open" data-id="${p.id}">${coverHtml(p)}</div>
     <div class="info">
       <h3>${esc(p.title)}</h3>
-      <div class="author">${esc(p.author)} · том ${p.volume}<br>${esc(p.genre)}${p.rating_count ? `<br><span class="stars">★ ${p.rating.toFixed(1)}</span> <span class="muted2">(${p.rating_count})</span>` : ""}</div>
+      <div class="author">${esc(p.author)} · том ${p.volume}<br>${esc(p.genre)}${p.rating_count ? `<br><span class="stars">★ ${p.rating.toFixed(1)}</span> <span class="muted2">(${p.rating_count})</span>` : ""}${p.preview_count ? `<br><span class="muted2">📖 есть предпросмотр</span>` : ""}</div>
       <div class="row"><span class="price">${money(p.price)}</span>
         <button class="fav ${favIds.has(p.id) ? "on" : ""}" data-act="fav" data-id="${p.id}" title="В избранное">♥</button></div>
       <button class="buy" data-act="add" data-id="${p.id}" ${p.stock < 1 ? "disabled" : ""}>${p.stock < 1 ? "Нет в наличии" : "В корзину"}</button>
@@ -260,8 +260,9 @@ async function openProduct(id) {
     <p>${esc(p.description) || "Описания пока нет."}</p>
     <p class="muted" style="margin-top:10px">В наличии: ${p.stock} шт.</p></div></div>
     <button class="btn" data-act="add" data-id="${p.id}" ${p.stock < 1 ? "disabled" : ""} style="margin-top:14px">В корзину</button>
+    <div id="previewBox" class="preview"></div>
     <div id="reviewsBox" class="reviews">Загрузка…</div>`, true);
-  curPid = id; replyTo = null; loadReviews();
+  curPid = id; replyTo = null; loadReviews(); loadPreview();
 }
 
 async function openProductForm(id) {
@@ -347,6 +348,71 @@ async function sendComment() {
   await loadReviews();
   toast("Комментарий добавлен");
 }
+
+// ---------- предпросмотр манги (пробные страницы) ----------
+let previewPages = [], pvIndex = 0;
+const isStaff = () => me && (me.role === "admin" || me.role === "mangaka");
+
+async function loadPreview() {
+  const box = $("#previewBox");
+  if (!box) return;
+  try { previewPages = await api("/products/" + curPid + "/preview"); } catch { return; }
+  const read = previewPages.length
+    ? `<button class="ghost" data-act="open-preview" data-i="0">📖 Читать предпросмотр (${previewPages.length} стр.)</button>` : "";
+  const manage = isStaff() ? `<div class="pvManage">
+      <div class="muted2">Страницы предпросмотра: JPG, PNG или WEBP до 5 МБ каждая, до 20 страниц. Можно выбрать сразу несколько файлов, они добавятся по порядку имён.</div>
+      <div class="pvThumbs">${previewPages.map((p, i) => `<div class="pvThumb"><img src="${esc(p.url)}" alt=""><span>${i + 1}</span>
+        <button data-act="del-preview" data-id="${p.id}" title="Удалить страницу">✕</button></div>`).join("")}</div>
+      <input id="f_preview_files" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
+      <button class="ghost" data-act="pick-preview">+ Добавить страницы</button>
+      <div class="err" id="pvErr"></div></div>` : "";
+  box.innerHTML = read + manage;
+}
+
+function viewerHtml(i) {
+  const n = previewPages.length;
+  return `<button class="close" data-act="close">×</button><h3>Предпросмотр</h3>
+    <div class="viewer"><img id="pvImg" src="${esc(previewPages[i].url)}" alt="Страница ${i + 1}"></div>
+    <div class="pvNav"><button class="ghost" data-act="pv-prev" ${i === 0 ? "disabled" : ""}>‹ Назад</button>
+      <b>${i + 1} / ${n}</b>
+      <button class="ghost" data-act="pv-next" ${i === n - 1 ? "disabled" : ""}>Вперёд ›</button></div>
+    <button class="btn" data-act="pv-back">К описанию манги</button>`;
+}
+
+function showPage(i) {
+  pvIndex = Math.max(0, Math.min(previewPages.length - 1, i));
+  $("#modalBox").innerHTML = viewerHtml(pvIndex);
+  if (previewPages[pvIndex + 1]) new Image().src = previewPages[pvIndex + 1].url;  // следующая страница подгружается заранее
+}
+
+document.addEventListener("keydown", e => {
+  if (!$("#pvImg") || $("#modal").hidden) return;  // стрелки работают только пока открыт просмотр
+  if (e.key === "ArrowRight") showPage(pvIndex + 1);
+  if (e.key === "ArrowLeft") showPage(pvIndex - 1);
+});
+
+// выбрали файлы страниц: загружаем по очереди и добавляем в предпросмотр
+document.addEventListener("change", async e => {
+  if (e.target.id !== "f_preview_files") return;
+  const files = [...e.target.files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  e.target.value = "";
+  if (!files.length) return;
+  const err = $("#pvErr");
+  let done = 0, problem = "";
+  for (const f of files) {
+    if (f.size > 5 * 1024 * 1024) { problem = `«${f.name}» больше 5 МБ`; break; }
+    err.textContent = `Загружаю ${done + 1} из ${files.length}…`;
+    try {
+      const up = await uploadCover(f);
+      await api(`/products/${curPid}/preview`, { method: "POST", body: { cover_url: up.cover_url } });
+      done++;
+    } catch (ex) { problem = `«${f.name}»: ${ex.message}`; break; }
+  }
+  if (done) ratingsChanged = true;  // после закрытия окна каталог обновится, и на карточке появится пометка
+  await loadPreview();
+  if (problem && $("#pvErr")) $("#pvErr").textContent = problem;
+  if (done) toast(`Добавлено страниц: ${done}`);
+});
 
 // окно мангаки: меняется только обложка, остальные поля товара ему недоступны
 async function openCoverForm(id) {
@@ -443,6 +509,18 @@ document.addEventListener("click", async e => {
       }
       case "cancel-reply": replyTo = null; await loadReviews(); break;
       case "send-comment": await sendComment(); break;
+      case "open-preview": openModal(viewerHtml(0), true); showPage(+el.dataset.i); break;
+      case "pv-prev": showPage(pvIndex - 1); break;
+      case "pv-next": showPage(pvIndex + 1); break;
+      case "pv-back": openProduct(curPid); break;
+      case "pick-preview": $("#f_preview_files").click(); break;
+      case "del-preview":
+        if (confirm("Удалить эту страницу предпросмотра?")) {
+          await api(`/products/${curPid}/preview/${id}`, { method: "DELETE" });
+          ratingsChanged = true;
+          await loadPreview();
+        }
+        break;
       case "del-comment":
         if (confirm("Удалить комментарий?")) { await api("/comments/" + id, { method: "DELETE" }); await loadReviews(); }
         break;

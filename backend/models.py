@@ -39,6 +39,15 @@ class Cover(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow)
 
 
+class PreviewPage(Base):
+    """Страница предпросмотра манги. Сама картинка лежит в таблице covers, здесь хранится только порядок."""
+    __tablename__ = "preview_pages"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
+    cover_id: Mapped[int] = mapped_column(ForeignKey("covers.id", ondelete="CASCADE"))
+    position: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class Favorite(Base):
     __tablename__ = "favorites"
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)

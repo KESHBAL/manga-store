@@ -9,7 +9,7 @@ from sqlalchemy import select, func, delete, desc, or_
 from sqlalchemy.orm import Session
 
 from database import engine, get_db
-from models import Base, User, Product, Favorite, CartItem, Order, OrderItem, Cover, Rating, Comment
+from models import Base, User, Product, Favorite, CartItem, Order, OrderItem, Cover, Rating, Comment, PreviewPage
 from genres import GENRES
 from auth import hash_password, check_password, make_token, current_user, admin_only, bearer
 
@@ -62,9 +62,14 @@ def rating_map(db: Session, ids: list[int]) -> dict:
 
 
 def with_rating(items: list[dict], db: Session) -> list[dict]:
-    m = rating_map(db, [i["id"] for i in items])
+    """Добавляет к карточкам среднюю оценку и число страниц предпросмотра (двумя запросами на весь список)."""
+    ids = [i["id"] for i in items]
+    m = rating_map(db, ids)
+    pc = dict(db.execute(select(PreviewPage.product_id, func.count())
+                         .where(PreviewPage.product_id.in_(ids)).group_by(PreviewPage.product_id)).all()) if ids else {}
     for i in items:
         i["rating"], i["rating_count"] = m.get(i["id"], (0, 0))
+        i["preview_count"] = pc.get(i["id"], 0)
     return items
 
 
@@ -205,7 +210,12 @@ def delete_product(pid: int, db: Session = Depends(get_db), _: User = Depends(ad
     db.execute(delete(CartItem).where(CartItem.product_id == pid))
     db.execute(delete(Comment).where(Comment.product_id == pid))
     db.execute(delete(Rating).where(Rating.product_id == pid))
+    page_covers = db.scalars(select(PreviewPage.cover_id).where(PreviewPage.product_id == pid)).all()
+    db.execute(delete(PreviewPage).where(PreviewPage.product_id == pid))
     db.delete(p)
+    db.flush()
+    for cid in page_covers:
+        drop_cover_if_unused(db, cid)  # страницы удалённой манги не копятся в базе
     db.commit()
     return {"ok": True}
 
@@ -284,6 +294,59 @@ def set_cover(pid: int, data: CoverIn, db: Session = Depends(get_db), _: User = 
     p.cover_url = data.cover_url
     db.commit()
     return card(p)
+
+
+# ---------- предпросмотр манги (пробные страницы) ----------
+MAX_PREVIEW_PAGES = 20
+
+
+def drop_cover_if_unused(db: Session, cid: int) -> None:
+    """Удаляет картинку из базы, если на неё больше нет ссылок: ни обложки товара, ни страницы предпросмотра."""
+    in_products = db.scalar(select(func.count()).select_from(Product).where(Product.cover_url == f"/api/covers/{cid}"))
+    in_pages = db.scalar(select(func.count()).select_from(PreviewPage).where(PreviewPage.cover_id == cid))
+    if not in_products and not in_pages:
+        db.execute(delete(Cover).where(Cover.id == cid))
+
+
+def preview_list(db: Session, pid: int) -> list[dict]:
+    rows = db.scalars(select(PreviewPage).where(PreviewPage.product_id == pid)
+                      .order_by(PreviewPage.position, PreviewPage.id)).all()
+    return [{"id": r.id, "url": f"/api/covers/{r.cover_id}"} for r in rows]
+
+
+@app.get("/api/products/{pid}/preview")
+def get_preview(pid: int, db: Session = Depends(get_db)):
+    get_product(db, pid)
+    return preview_list(db, pid)
+
+
+@app.post("/api/products/{pid}/preview")
+def add_preview(pid: int, data: CoverIn, db: Session = Depends(get_db), _: User = Depends(staff_only)):
+    """Добавляет страницу в конец. Картинку сначала загружают через /api/upload-cover, сюда приходит её адрес."""
+    get_product(db, pid)
+    m = COVER_URL_RE.match(data.cover_url)
+    if not m or not db.get(Cover, int(m.group(1))):
+        raise HTTPException(400, "Сначала загрузите страницу через сайт")
+    count = db.scalar(select(func.count()).select_from(PreviewPage).where(PreviewPage.product_id == pid))
+    if count >= MAX_PREVIEW_PAGES:
+        raise HTTPException(400, f"Максимум {MAX_PREVIEW_PAGES} страниц предпросмотра")
+    last = db.scalar(select(func.max(PreviewPage.position)).where(PreviewPage.product_id == pid))
+    db.add(PreviewPage(product_id=pid, cover_id=int(m.group(1)), position=(last or 0) + 1))
+    db.commit()
+    return preview_list(db, pid)
+
+
+@app.delete("/api/products/{pid}/preview/{page_id}")
+def delete_preview(pid: int, page_id: int, db: Session = Depends(get_db), _: User = Depends(staff_only)):
+    page = db.get(PreviewPage, page_id)
+    if not page or page.product_id != pid:
+        raise HTTPException(404, "Страница не найдена")
+    cid = page.cover_id
+    db.delete(page)
+    db.flush()
+    drop_cover_if_unused(db, cid)
+    db.commit()
+    return preview_list(db, pid)
 
 
 # ---------- оценки и комментарии ----------
