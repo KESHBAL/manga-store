@@ -14,7 +14,7 @@ from sqlalchemy import select, func, delete, desc, or_
 from sqlalchemy.orm import Session
 
 from database import engine, get_db
-from models import Base, User, Product, Favorite, CartItem, Order, OrderItem, Cover, Rating, Comment, PreviewPage, Payment
+from models import Base, User, Product, Favorite, CartItem, Order, OrderItem, Cover, Rating, Comment, PreviewPage, Payment, Profile
 from genres import GENRES
 from auth import hash_password, check_password, make_token, current_user, admin_only, bearer
 
@@ -133,9 +133,15 @@ def login(data: AuthIn, db: Session = Depends(get_db)):
     return auth_response(user)
 
 
+def avatar_url(pr: Profile | None) -> str | None:
+    return f"/api/covers/{pr.avatar_id}" if pr and pr.avatar_id else None
+
+
 @app.get("/api/me")
-def me(user: User = Depends(current_user)):
-    return {"email": user.email, "role": user.role}
+def me(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    pr = db.get(Profile, user.id)
+    return {"email": user.email, "role": user.role, "nickname": pr.nickname if pr else None,
+            "avatar_url": avatar_url(pr)}
 
 
 # ---------- каталог: фильтрация + постраничный вывод ----------
@@ -306,10 +312,11 @@ MAX_PREVIEW_PAGES = 20
 
 
 def drop_cover_if_unused(db: Session, cid: int) -> None:
-    """Удаляет картинку из базы, если на неё больше нет ссылок: ни обложки товара, ни страницы предпросмотра."""
+    """Удаляет картинку из базы, если на неё больше нет ссылок: ни обложки товара, ни страницы предпросмотра, ни аватара."""
     in_products = db.scalar(select(func.count()).select_from(Product).where(Product.cover_url == f"/api/covers/{cid}"))
     in_pages = db.scalar(select(func.count()).select_from(PreviewPage).where(PreviewPage.cover_id == cid))
-    if not in_products and not in_pages:
+    in_avatars = db.scalar(select(func.count()).select_from(Profile).where(Profile.avatar_id == cid))
+    if not in_products and not in_pages and not in_avatars:
         db.execute(delete(Cover).where(Cover.id == cid))
 
 
@@ -372,9 +379,9 @@ class CommentIn(BaseModel):
         return v
 
 
-def public_name(u: User) -> str:
-    """В комментариях показываем только часть email до @, чтобы не раскрывать адреса читателей."""
-    return u.email.split("@")[0]
+def public_name(u: User, pr: Profile | None = None) -> str:
+    """В комментариях показываем ник, а если его нет - только часть email до @, чтобы не раскрывать адреса читателей."""
+    return pr.nickname if pr and pr.nickname else u.email.split("@")[0]
 
 
 def review_info(db: Session, pid: int, me: User | None) -> dict:
@@ -387,12 +394,13 @@ def review_info(db: Session, pid: int, me: User | None) -> dict:
 def reviews(pid: int, db: Session = Depends(get_db), me: User | None = Depends(optional_user)):
     get_product(db, pid)
     rows = db.execute(
-        select(Comment, User).join(User, User.id == Comment.user_id)
+        select(Comment, User, Profile).join(User, User.id == Comment.user_id)
+        .outerjoin(Profile, Profile.user_id == User.id)
         .where(Comment.product_id == pid).order_by(Comment.created_at, Comment.id).limit(500)
     ).all()
-    comments = [{"id": c.id, "parent_id": c.parent_id, "user": public_name(u), "role": u.role, "text": c.text,
-                 "created_at": c.created_at.isoformat() + "Z",
-                 "can_delete": bool(me and (me.id == c.user_id or me.role == "admin"))} for c, u in rows]
+    comments = [{"id": c.id, "parent_id": c.parent_id, "user": public_name(u, pr), "role": u.role, "text": c.text,
+                 "avatar": avatar_url(pr), "created_at": c.created_at.isoformat() + "Z",
+                 "can_delete": bool(me and (me.id == c.user_id or me.role == "admin"))} for c, u, pr in rows]
     return {**review_info(db, pid, me), "comments": comments}
 
 
@@ -648,6 +656,123 @@ def my_orders(db: Session = Depends(get_db), user: User = Depends(current_user))
     return [{"id": o.id, "total": o.total, "paid": o.id in paid, "date": o.created_at.strftime("%d.%m.%Y %H:%M"),
              "items": [{"title": i.title, "price": i.price, "quantity": i.quantity} for i in o.items]}
             for o in orders]
+
+
+# ---------- профиль пользователя ----------
+MAX_AVATAR_SIZE = 2 * 1024 * 1024  # 2 МБ
+NICK_RE = re.compile(r"^[A-Za-zА-Яа-яЁё0-9_. \-]{2,24}$")
+
+
+class ProfileIn(BaseModel):
+    nickname: str = Field(default="", max_length=24)
+    bio: str = Field(default="", max_length=300)
+
+    @field_validator("nickname")
+    @classmethod
+    def nick_ok(cls, v):
+        v = " ".join(v.split())  # лишние пробелы убираем
+        if v and not NICK_RE.match(v):
+            raise ValueError("2–24 символа: буквы, цифры, пробел, _ . -")
+        return v
+
+    @field_validator("bio")
+    @classmethod
+    def bio_strip(cls, v):
+        return v.strip()
+
+
+class PasswordIn(BaseModel):
+    current_password: str = Field(max_length=200)
+    new_password: str = Field(min_length=6, max_length=72)
+
+
+def get_or_create_profile(db: Session, user: User) -> Profile:
+    pr = db.get(Profile, user.id)
+    if not pr:
+        pr = Profile(user_id=user.id, bio="")
+        db.add(pr)
+        db.flush()
+    return pr
+
+
+def profile_view(db: Session, user: User) -> dict:
+    pr = db.get(Profile, user.id)
+    n_orders, spent = db.execute(select(func.count(), func.coalesce(func.sum(Order.total), 0))
+                                 .where(Order.user_id == user.id)).one()
+    count = lambda col, tbl: db.scalar(select(func.count()).select_from(tbl).where(col == user.id))
+    # любимый жанр: чего куплено больше всего, а если покупок нет - что чаще в избранном
+    row = db.execute(select(Product.genre).join(OrderItem, OrderItem.product_id == Product.id)
+                     .join(Order, Order.id == OrderItem.order_id).where(Order.user_id == user.id)
+                     .group_by(Product.genre).order_by(desc(func.sum(OrderItem.quantity))).limit(1)).first()
+    if not row:
+        row = db.execute(select(Product.genre).join(Favorite, Favorite.product_id == Product.id)
+                         .where(Favorite.user_id == user.id).group_by(Product.genre)
+                         .order_by(desc(func.count())).limit(1)).first()
+    return {"email": user.email, "role": user.role,
+            "nickname": pr.nickname if pr else None, "bio": pr.bio if pr else "", "avatar_url": avatar_url(pr),
+            "favorite_genre": row[0] if row else None,
+            "stats": {"orders": n_orders, "spent": int(spent), "comments": count(Comment.user_id, Comment),
+                      "ratings": count(Rating.user_id, Rating), "favorites": count(Favorite.user_id, Favorite)}}
+
+
+@app.get("/api/profile")
+def get_profile(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    return profile_view(db, user)
+
+
+@app.patch("/api/profile")
+def update_profile(data: ProfileIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    pr = get_or_create_profile(db, user)
+    key = data.nickname.lower() or None
+    if key and db.scalar(select(Profile).where(Profile.nick_key == key, Profile.user_id != user.id)):
+        raise HTTPException(400, "Этот ник уже занят")
+    pr.nickname = data.nickname or None
+    pr.nick_key = key
+    pr.bio = data.bio
+    db.commit()
+    return profile_view(db, user)
+
+
+@app.post("/api/profile/avatar")
+async def upload_avatar(file: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(current_user)):
+    data = await file.read(MAX_AVATAR_SIZE + 1)
+    if len(data) > MAX_AVATAR_SIZE:
+        raise HTTPException(400, "Файл слишком большой (максимум 2 МБ)")
+    ctype = detect_image_type(data)
+    if not ctype:
+        raise HTTPException(400, "Нужна картинка JPG, PNG или WEBP")
+    pr = get_or_create_profile(db, user)
+    old = pr.avatar_id
+    cover = Cover(content_type=ctype, data=data)  # аватар лежит в той же таблице картинок, что и обложки
+    db.add(cover)
+    db.flush()
+    pr.avatar_id = cover.id
+    db.flush()
+    if old:
+        drop_cover_if_unused(db, old)  # у пользователя всегда одна картинка: старая удаляется
+    db.commit()
+    return profile_view(db, user)
+
+
+@app.delete("/api/profile/avatar")
+def delete_avatar(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    pr = db.get(Profile, user.id)
+    if pr and pr.avatar_id:
+        old = pr.avatar_id
+        pr.avatar_id = None
+        db.flush()
+        drop_cover_if_unused(db, old)
+        db.commit()
+    return profile_view(db, user)
+
+
+@app.post("/api/profile/password")
+def change_password(data: PasswordIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    if not check_password(data.current_password, user.password_hash):
+        raise HTTPException(400, "Текущий пароль неверный")
+    user.password_hash = hash_password(data.new_password)
+    db.commit()
+    return {"ok": True}
 
 
 # ---------- сайт (фронтенд) отдаётся этим же сервером ----------

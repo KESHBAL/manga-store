@@ -11,7 +11,7 @@ let view = "catalog";
 
 // ---------- запросы к бэкенду ----------
 const FIELD_NAMES = { title: "Название", author: "Автор", genre: "Жанр", price: "Цена", stock: "Остаток",
-  volume: "Том", cover_url: "Обложка", description: "Описание" };
+  volume: "Том", cover_url: "Обложка", description: "Описание", nickname: "Ник", bio: "О себе", new_password: "Новый пароль" };
 
 // превращает ответ сервера об ошибке в понятную фразу
 function errText(d) {
@@ -80,17 +80,19 @@ function renderNav() {
   }
   const role = me ? me.role : "guest";
   badge.className = "role " + role;
-  badge.textContent = !me ? "Гость" : (me.role === "admin" ? "★ Админ · " : me.role === "mangaka" ? "✎ Мангака · " : "Пользователь · ") + me.email;
+  badge.textContent = !me ? "Гость" : (me.role === "admin" ? "★ Админ · " : me.role === "mangaka" ? "✎ Мангака · " : "Пользователь · ") + (me.nickname || me.email);
+  if (me) { badge.dataset.view = "profile"; badge.title = "Открыть профиль"; } else { delete badge.dataset.view; badge.removeAttribute("title"); }
 }
 
 function showView(name) {
   view = name;
-  ["catalog", "favs", "cart", "orders"].forEach(v => $("#v-" + v).hidden = v !== name);
+  ["catalog", "favs", "cart", "orders", "profile"].forEach(v => $("#v-" + v).hidden = v !== name);
   renderNav();
   if (name === "catalog") loadCatalog();
   if (name === "favs") loadFavs();
   if (name === "cart") loadCart();
   if (name === "orders") loadOrders();
+  if (name === "profile") loadProfile();
 }
 
 async function refreshCartCount() {
@@ -272,10 +274,10 @@ async function doAuth(kind) {
   try {
     const d = await api("/auth/" + kind, { method: "POST", body: { email: $("#aEmail").value, password: $("#aPass").value } });
     token = d.token; localStorage.setItem("token", token);
-    me = { email: d.email, role: d.role };
+    me = await api("/me");
     await loadFavIds();
     closeModal(); renderNav(); refreshCartCount(); showView("catalog");
-    toast("Добро пожаловать, " + d.email);
+    toast("Добро пожаловать, " + (me.nickname || d.email));
   } catch (e) { $("#aErr").textContent = e.message; }
 }
 
@@ -336,6 +338,87 @@ async function saveProduct(id) {
   } catch (e) { $("#aErr").textContent = e.message; }
 }
 
+// ---------- профиль ----------
+function avatarHtml(url, name, size) {
+  const letter = esc((name || "?").trim().charAt(0).toUpperCase());
+  return `<span class="ava ${size || ""}">${url ? `<img src="${esc(url)}" alt="">` : letter}</span>`;
+}
+
+async function loadProfile() {
+  const box = $("#profileBox");
+  try {
+    const p = await api("/profile");
+    me.nickname = p.nickname; me.avatar_url = p.avatar_url; renderNav();
+    const name = p.nickname || p.email.split("@")[0];
+    const st = p.stats;
+    box.innerHTML = `<div class="profile">
+      <div class="pfSide">
+        ${avatarHtml(p.avatar_url, name, "big")}
+        <input type="file" id="avatarFile" accept="image/jpeg,image/png,image/webp" hidden>
+        <button class="ghost" data-act="pick-avatar">${p.avatar_url ? "Сменить фото" : "Загрузить фото"}</button>
+        ${p.avatar_url ? `<button class="ghost" data-act="del-avatar">Удалить фото</button>` : ""}
+        <p class="muted2">JPG, PNG или WEBP, до 2 МБ</p>
+      </div>
+      <div class="pfMain">
+        <h3 class="pfName">${esc(name)}${roleTag(p.role)}</h3>
+        <p class="muted2">${esc(p.email)}</p>
+        <div class="pfStats">
+          <div><b>${st.orders}</b><span>заказов</span></div>
+          <div><b>${money(st.spent)}</b><span>потрачено</span></div>
+          <div><b>${st.favorites}</b><span>в избранном</span></div>
+          <div><b>${st.ratings}</b><span>оценок</span></div>
+          <div><b>${st.comments}</b><span>комментариев</span></div>
+          <div><b>${p.favorite_genre ? esc(p.favorite_genre) : "—"}</b><span>любимый жанр</span></div>
+        </div>
+        <h4>О себе</h4>
+        <label>Ник (его видят в комментариях)<input id="pf_nick" maxlength="24" placeholder="${esc(p.email.split("@")[0])}" value="${esc(p.nickname || "")}"></label>
+        <label>О себе<textarea id="pf_bio" maxlength="300" rows="4" placeholder="Любимые мангу, жанры, что читаете сейчас">${esc(p.bio)}</textarea></label>
+        <p class="err" id="pfErr"></p>
+        <button class="btn" data-act="save-profile">Сохранить</button>
+        <h4>Сменить пароль</h4>
+        <label>Текущий пароль<input id="pw_old" type="password" autocomplete="current-password"></label>
+        <label>Новый пароль (от 6 символов)<input id="pw_new" type="password" autocomplete="new-password"></label>
+        <p class="err" id="pwErr"></p>
+        <button class="btn" data-act="save-password">Сменить пароль</button>
+      </div></div>`;
+  } catch (e) { box.innerHTML = `<p class="empty">${esc(e.message)}</p>`; }
+}
+
+async function saveProfile() {
+  $("#pfErr").textContent = "";
+  try {
+    await api("/profile", { method: "PATCH", body: { nickname: $("#pf_nick").value, bio: $("#pf_bio").value } });
+    toast("Профиль сохранён");
+    await loadProfile();
+  } catch (e) { $("#pfErr").textContent = e.message; }
+}
+
+async function savePassword() {
+  $("#pwErr").textContent = "";
+  try {
+    await api("/profile/password", { method: "POST", body: { current_password: $("#pw_old").value, new_password: $("#pw_new").value } });
+    $("#pw_old").value = ""; $("#pw_new").value = "";
+    toast("Пароль изменён");
+  } catch (e) { $("#pwErr").textContent = e.message; }
+}
+
+// выбрали фото: проверяем размер и отправляем на сервер
+document.addEventListener("change", async e => {
+  if (e.target.id !== "avatarFile") return;
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  if (file.size > 2 * 1024 * 1024) { toast("Фото больше 2 МБ"); return; }
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const res = await fetch(API + "/profile/avatar", { method: "POST", headers: { Authorization: "Bearer " + token }, body: fd });
+    if (!res.ok) throw new Error(errText((await res.json().catch(() => ({}))).detail));
+    toast("Фото обновлено");
+    await loadProfile();
+  } catch (err) { toast(err.message); }
+});
+
 // ---------- оценки и комментарии ----------
 let curPid = null, replyTo = null, ratingsChanged = false;
 const stars = n => "★".repeat(n) + "☆".repeat(5 - n);
@@ -344,7 +427,7 @@ const roleTag = r => r === "admin" ? ` <span class="tag">Админ</span>` : r 
 
 function commentHtml(c, isReply) {
   return `<div class="cm ${isReply ? "reply" : ""}">
-    <div class="cmHead"><b>${esc(c.user)}</b>${roleTag(c.role)} <span class="muted2">${esc(fmtDate(c.created_at))}</span></div>
+    <div class="cmHead">${avatarHtml(c.avatar, c.user, "sm")}<b>${esc(c.user)}</b>${roleTag(c.role)} <span class="muted2">${esc(fmtDate(c.created_at))}</span></div>
     <p class="cmText">${esc(c.text)}</p>
     <div class="cmAct">${me ? `<button data-act="reply" data-id="${c.id}" data-user="${esc(c.user)}">Ответить</button>` : ""}${c.can_delete ? `<button data-act="del-comment" data-id="${c.id}">Удалить</button>` : ""}</div></div>`;
 }
@@ -521,6 +604,10 @@ document.addEventListener("click", async e => {
       case "do-login": doAuth("login"); break;
       case "do-reg": doAuth("register"); break;
       case "logout": logout(); break;
+      case "pick-avatar": $("#avatarFile").click(); break;
+      case "del-avatar": if (confirm("Удалить фото?")) { await api("/profile/avatar", { method: "DELETE" }); await loadProfile(); } break;
+      case "save-profile": saveProfile(); break;
+      case "save-password": savePassword(); break;
       case "open": openProduct(id); break;
       case "new": openProductForm(); break;
       case "edit": openProductForm(id); break;

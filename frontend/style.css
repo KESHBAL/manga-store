@@ -139,3 +139,23 @@ input:focus, select:focus, textarea:focus { outline:none; border-color:var(--red
 .ppNote { font-size:13px; color:#666; text-align:right; margin-bottom:8px; }
 .stripeBtn { width:100%; background:#635bff; margin-top:0; }
 .stripeBtn:hover { background:#4b44d1; }
+
+/* профиль */
+.ava { display:inline-flex; align-items:center; justify-content:center; flex:none; width:40px; height:40px; background:var(--dark); color:var(--white);
+  font-weight:900; font-size:18px; border:2px solid var(--line); overflow:hidden; vertical-align:middle; }
+.ava img { width:100%; height:100%; object-fit:cover; display:block; }
+.ava.sm { width:26px; height:26px; font-size:13px; border-width:2px; }
+.ava.big { width:150px; height:150px; font-size:64px; border-width:3px; }
+.profile { display:grid; grid-template-columns:190px 1fr; gap:28px; align-items:start; max-width:860px; }
+.pfSide { display:flex; flex-direction:column; gap:8px; align-items:flex-start; }
+.pfSide .ghost { width:150px; }
+.pfName { font-size:26px; text-transform:uppercase; margin-bottom:2px; }
+.pfMain h4 { text-transform:uppercase; margin:22px 0 10px; }
+.pfMain .btn { width:auto; padding:10px 22px; }
+.pfStats { display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:10px; margin-top:14px; }
+.pfStats div { background:var(--white); border:3px solid var(--line); padding:10px; display:flex; flex-direction:column; gap:2px; }
+.pfStats b { font-size:18px; overflow-wrap:anywhere; }
+.pfStats span { font-size:12px; color:#666; }
+.role[data-view] { cursor:pointer; }
+.cmHead .ava { margin-right:2px; }
+@media (max-width:800px) { .profile { grid-template-columns:1fr; } }

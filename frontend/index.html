@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Kagayaku kin'yōbi</title>
-  <link rel="stylesheet" href="style.css?v=3">
+  <link rel="stylesheet" href="style.css?v=4">
   <link rel="icon" href="/img/steel-ball.png">
 </head>
 <body>
@@ -16,6 +16,7 @@
         <button data-view="favs" class="need-auth">Избранное</button>
         <button data-view="cart" class="need-auth">Корзина <i id="cartCount">0</i></button>
         <button data-view="orders" class="need-auth">Заказы</button>
+        <button data-view="profile" class="need-auth">Профиль</button>
         <button id="addProductBtn" class="admin-only" data-act="new">+ Товар</button>
         <button id="loginBtn" class="accent" data-act="auth">Войти</button>
         <button id="logoutBtn" class="accent" data-act="logout">Выйти</button>
@@ -53,10 +54,11 @@
     <section id="v-favs" hidden><h2>Избранное</h2><div id="favGrid" class="grid"></div></section>
     <section id="v-cart" hidden><h2>Корзина</h2><div id="cartBox"></div></section>
     <section id="v-orders" hidden><h2>Мои заказы</h2><div id="ordersBox"></div></section>
+    <section id="v-profile" hidden><h2>Профиль</h2><div id="profileBox"></div></section>
   </main>
 
   <div id="modal" class="modal" hidden><div class="box" id="modalBox"></div></div>
   <div id="toast"></div>
-  <script src="app.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

@@ -109,3 +109,13 @@ class Payment(Base):
     items: Mapped[str] = mapped_column(Text)              # снимок корзины: [[id товара, количество], ...]
     order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow)
+
+
+class Profile(Base):
+    """Профиль пользователя. Отдельная таблица: уже существующую users менять не нужно."""
+    __tablename__ = "profiles"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    nickname: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    nick_key: Mapped[str | None] = mapped_column(String(24), unique=True, nullable=True)  # ник в нижнем регистре: ники не повторяются
+    bio: Mapped[str] = mapped_column(String(300), default="")
+    avatar_id: Mapped[int | None] = mapped_column(ForeignKey("covers.id", ondelete="SET NULL"), nullable=True)
