@@ -185,6 +185,7 @@ async function loadFavs() {
 // ---------- корзина ----------
 async function loadCart() {
   const c = await api("/cart");
+  if (!stripeConfig) { try { stripeConfig = await fetch("/api/stripe/config").then(r => r.json()); } catch { stripeConfig = { enabled: false }; } }
   $("#cartCount").textContent = c.count;
   if (!c.items.length) { $("#cartBox").innerHTML = `<p class="empty">Корзина пуста</p>`; return; }
   $("#cartBox").innerHTML = c.items.map(i => `
@@ -196,13 +197,47 @@ async function loadCart() {
       <b class="price">${money(i.subtotal)}</b>
       <button class="qty" data-act="rm" data-id="${i.id}" style="border:none;background:none;font-size:20px">✕</button>
     </div>`).join("") +
-    `<div class="totalBox">Итого: ${money(c.total)} <button class="btn" data-act="order">Оформить заказ</button></div>`;
+    `<div class="totalBox">Итого: ${money(c.total)}${stripeConfig.enabled ? "" : ` <button class="btn" data-act="order">Оформить заказ</button>`}</div>
+     <div id="stripeBox"></div>`;
+  setupStripe(c.total);
+}
+
+// ---------- оплата картой (Stripe) ----------
+let stripeConfig = null;
+async function setupStripe(total) {
+  const box = $("#stripeBox");
+  if (!box) return;
+  try {
+    if (!stripeConfig || !stripeConfig.enabled || !$("#stripeBox")) return;
+    const usd = (Math.ceil(total / stripeConfig.rate * 100) / 100).toFixed(2);
+    box.innerHTML = `<p class="ppNote">Оплата картой${stripeConfig.test ? " (тестовый режим)" : ""}: к оплате ≈ $${usd}
+      (курс 1 $ = ${stripeConfig.rate} ₸)</p><button class="btn stripeBtn" data-act="stripe-pay">Оплатить картой</button>`;
+  } catch { /* без оплаты картой остаётся обычное оформление */ }
+}
+async function stripePay(btn) {
+  btn.disabled = true; btn.textContent = "Переходим к оплате…";
+  try {
+    const r = await api("/stripe/checkout", { method: "POST", body: { origin: location.origin } });
+    location.href = r.url;  // страница оплаты Stripe
+  } catch (e) { btn.disabled = false; btn.textContent = "Оплатить картой"; throw e; }
+}
+async function stripeReturn() {  // Stripe вернул покупателя на сайт после оплаты
+  const q = new URLSearchParams(location.search);
+  const sid = q.get("stripe_session");
+  if (!sid && !q.get("stripe_cancel")) return;
+  history.replaceState(null, "", location.pathname);  // убираем служебные параметры из адреса
+  if (!sid) { toast("Оплата отменена"); return; }
+  try {
+    const o = await api("/stripe/confirm/" + encodeURIComponent(sid), { method: "POST" });
+    toast(`Заказ №${o.id} оплачен: ${money(o.total)}`);
+    showView("orders"); refreshCartCount();
+  } catch (e) { toast(e.message); }
 }
 
 async function loadOrders() {
   const list = await api("/orders");
   $("#ordersBox").innerHTML = list.length ? list.map(o => `
-    <div class="order"><h4>Заказ №${o.id} · ${o.date} · ${money(o.total)}</h4>
+    <div class="order"><h4>Заказ №${o.id} · ${o.date} · ${money(o.total)}${o.paid ? ` <span class="tag">оплачено картой</span>` : ""}</h4>
     ${o.items.map(i => `<div>${esc(i.title)} — ${i.quantity} × ${money(i.price)}</div>`).join("")}</div>`).join("")
     : `<p class="empty">Заказов пока нет</p>`;
 }
@@ -541,6 +576,7 @@ document.addEventListener("click", async e => {
       case "inc": await api("/cart/" + id, { method: "PATCH", body: { quantity: +el.dataset.q + 1 } }); loadCart(); break;
       case "dec": await api("/cart/" + id, { method: "PATCH", body: { quantity: +el.dataset.q - 1 } }); loadCart(); break;
       case "rm": await api("/cart/" + id, { method: "DELETE" }); loadCart(); break;
+      case "stripe-pay": await stripePay(el); break;
       case "order": {
         const o = await api("/orders", { method: "POST" });
         toast(`Заказ №${o.id} оформлен на ${money(o.total)}`);
@@ -559,4 +595,5 @@ document.addEventListener("click", async e => {
   }
   await loadGenres();
   showView("catalog");
+  await stripeReturn();
 })();

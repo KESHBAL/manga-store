@@ -97,3 +97,15 @@ class OrderItem(Base):
     title: Mapped[str] = mapped_column(String(255))
     price: Mapped[int] = mapped_column(Integer)  # цена на момент покупки
     quantity: Mapped[int] = mapped_column(Integer)
+
+
+class Payment(Base):
+    """Платёж через Stripe. Отдельная таблица, чтобы не менять уже существующую orders."""
+    __tablename__ = "payments"
+    session_id: Mapped[str] = mapped_column(String(255), primary_key=True)  # id Checkout-сессии Stripe
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    total: Mapped[int] = mapped_column(Integer)           # сумма корзины в тенге
+    cents: Mapped[int] = mapped_column(Integer)           # сумма, которую просили у Stripe, в центах USD
+    items: Mapped[str] = mapped_column(Text)              # снимок корзины: [[id товара, количество], ...]
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow)

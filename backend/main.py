@@ -1,5 +1,10 @@
 import os
 import re
+import json
+import math
+import urllib.parse
+import urllib.request
+import urllib.error
 import datetime as dt
 from urllib.parse import unquote
 from fastapi import FastAPI, Depends, HTTPException, Query, UploadFile, File, Response
@@ -9,7 +14,7 @@ from sqlalchemy import select, func, delete, desc, or_
 from sqlalchemy.orm import Session
 
 from database import engine, get_db
-from models import Base, User, Product, Favorite, CartItem, Order, OrderItem, Cover, Rating, Comment, PreviewPage
+from models import Base, User, Product, Favorite, CartItem, Order, OrderItem, Cover, Rating, Comment, PreviewPage, Payment
 from genres import GENRES
 from auth import hash_password, check_password, make_token, current_user, admin_only, bearer
 
@@ -509,30 +514,138 @@ def cart_remove(pid: int, db: Session = Depends(get_db), user: User = Depends(cu
 
 
 # ---------- заказы ----------
-@app.post("/api/orders")
-def make_order(db: Session = Depends(get_db), user: User = Depends(current_user)):
-    rows = db.execute(select(CartItem, Product).join(Product, Product.id == CartItem.product_id)
-                      .where(CartItem.user_id == user.id)).all()
-    if not rows:
+def place_order(db: Session, user: User, items: list | None = None) -> Order:
+    """Превращает корзину (или снимок корзины [[id, кол-во], ...]) в заказ: списывает остатки и очищает корзину.
+    Всё в одной транзакции: либо выполнилось всё, либо ничего."""
+    if items is None:
+        items = [[c.product_id, c.quantity] for c in db.scalars(select(CartItem).where(CartItem.user_id == user.id))]
+    if not items:
         raise HTTPException(400, "Корзина пуста")
-    for c, p in rows:
-        if c.quantity > p.stock:
+    rows = []
+    for pid, qty in items:
+        p = db.get(Product, pid)
+        if not p:
+            raise HTTPException(400, "Один из товаров больше не продаётся")
+        if qty > p.stock:
             raise HTTPException(400, f"«{p.title}»: в наличии только {p.stock} шт.")
-    order = Order(user_id=user.id, total=sum(p.price * c.quantity for c, p in rows))
+        rows.append((p, qty))
+    order = Order(user_id=user.id, total=sum(p.price * q for p, q in rows))
     db.add(order)
     db.flush()
-    for c, p in rows:
-        p.stock -= c.quantity
-        db.add(OrderItem(order_id=order.id, product_id=p.id, title=p.title, price=p.price, quantity=c.quantity))
+    for p, q in rows:
+        p.stock -= q
+        db.add(OrderItem(order_id=order.id, product_id=p.id, title=p.title, price=p.price, quantity=q))
     db.execute(delete(CartItem).where(CartItem.user_id == user.id))
-    db.commit()  # всё выше - одна транзакция: либо всё выполнилось, либо ничего
+    return order
+
+
+@app.post("/api/orders")
+def make_order(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    if stripe_enabled():  # оплата подключена: заказ без оплаты оформить нельзя
+        raise HTTPException(400, "Заказ оплачивается картой: нажмите «Оплатить картой» в корзине")
+    order = place_order(db, user)
+    db.commit()
+    return {"id": order.id, "total": order.total}
+
+
+# ---------- оплата картой через Stripe ----------
+# Ключ берётся из переменной окружения (.env / Render). Секретный ключ живёт ТОЛЬКО на сервере.
+STRIPE_KEY = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+try:
+    KZT_PER_USD = float(os.getenv("KZT_PER_USD") or 500)  # Stripe-платёж идёт в долларах, переводим тенге по курсу
+except ValueError:
+    KZT_PER_USD = 500.0
+if KZT_PER_USD <= 0:
+    KZT_PER_USD = 500.0
+STRIPE_MIN_CENTS = 50  # минимальный платёж Stripe - 0,50 $
+
+
+class CheckoutIn(BaseModel):
+    origin: str = ""  # адрес сайта в браузере: на него Stripe вернёт покупателя после оплаты
+
+
+def stripe_enabled() -> bool:
+    return STRIPE_KEY.startswith(("sk_test_", "sk_live_", "rk_test_", "rk_live_"))
+
+
+def stripe_request(method: str, path: str, form: dict | None = None) -> dict:
+    """Один запрос к Stripe API (данные отправляются как форма, авторизация - секретным ключом)."""
+    req = urllib.request.Request(
+        "https://api.stripe.com" + path, method=method,
+        headers={"Authorization": "Bearer " + STRIPE_KEY},
+        data=urllib.parse.urlencode(form).encode() if form is not None else None)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        print("Stripe error:", e.code, e.read()[:500])
+        raise HTTPException(502, "Stripe отклонил запрос. Проверьте ключ и попробуйте ещё раз")
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        raise HTTPException(502, "Не удалось связаться со Stripe. Попробуйте позже")
+
+
+def to_cents(total_kzt: int) -> int:
+    return math.ceil(total_kzt / KZT_PER_USD * 100)  # переводим в центы, округляя вверх
+
+
+@app.get("/api/stripe/config")
+def stripe_config():
+    return {"enabled": stripe_enabled(), "rate": KZT_PER_USD, "test": STRIPE_KEY.startswith(("sk_test_", "rk_test_"))}
+
+
+@app.post("/api/stripe/checkout")
+def stripe_checkout(data: CheckoutIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    if not stripe_enabled():
+        raise HTTPException(503, "Оплата картой не настроена")
+    if not re.fullmatch(r"https?://[A-Za-z0-9.\-]+(:\d+)?", data.origin):
+        raise HTTPException(400, "Неверный адрес сайта")
+    cart = db.execute(select(CartItem, Product).join(Product, Product.id == CartItem.product_id)
+                      .where(CartItem.user_id == user.id)).all()
+    if not cart:
+        raise HTTPException(400, "Корзина пуста")
+    for c, p in cart:
+        if c.quantity > p.stock:
+            raise HTTPException(400, f"«{p.title}»: в наличии только {p.stock} шт.")
+    total = sum(p.price * c.quantity for c, p in cart)  # сумму считаем на сервере, а не берём из браузера
+    cents = to_cents(total)
+    if cents < STRIPE_MIN_CENTS:
+        raise HTTPException(400, f"Stripe принимает платежи от 0,50 $ (≈ {math.ceil(STRIPE_MIN_CENTS / 100 * KZT_PER_USD)} ₸)")
+    res = stripe_request("POST", "/v1/checkout/sessions", {
+        "mode": "payment",
+        "line_items[0][quantity]": "1",
+        "line_items[0][price_data][currency]": "usd",
+        "line_items[0][price_data][unit_amount]": str(cents),
+        "line_items[0][price_data][product_data][name]": f"Manga store: заказ на {total} ₸",
+        "success_url": data.origin + "/?stripe_session={CHECKOUT_SESSION_ID}",
+        "cancel_url": data.origin + "/?stripe_cancel=1",
+    })
+    db.add(Payment(session_id=res["id"], user_id=user.id, total=total, cents=cents,
+                   items=json.dumps([[p.id, c.quantity] for c, p in cart])))
+    db.commit()
+    return {"url": res["url"]}
+
+
+@app.post("/api/stripe/confirm/{session_id}")
+def stripe_confirm(session_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    pay = db.get(Payment, session_id)
+    if not pay or pay.user_id != user.id:
+        raise HTTPException(404, "Платёж не найден")
+    if pay.order_id:  # повторный вызов (обновили страницу): отдаём уже созданный заказ
+        return {"id": pay.order_id, "total": pay.total}
+    res = stripe_request("GET", "/v1/checkout/sessions/" + urllib.parse.quote(session_id, safe=""))
+    if res.get("payment_status") != "paid" or res.get("amount_total") != pay.cents or res.get("currency") != "usd":
+        raise HTTPException(400, "Оплата не подтверждена. Если деньги списались, подождите минуту и обновите страницу")
+    order = place_order(db, user, json.loads(pay.items))
+    pay.order_id = order.id
+    db.commit()
     return {"id": order.id, "total": order.total}
 
 
 @app.get("/api/orders")
 def my_orders(db: Session = Depends(get_db), user: User = Depends(current_user)):
     orders = db.scalars(select(Order).where(Order.user_id == user.id).order_by(desc(Order.id)).limit(50)).all()
-    return [{"id": o.id, "total": o.total, "date": o.created_at.strftime("%d.%m.%Y %H:%M"),
+    paid = set(db.scalars(select(Payment.order_id).where(Payment.user_id == user.id, Payment.order_id.is_not(None))))
+    return [{"id": o.id, "total": o.total, "paid": o.id in paid, "date": o.created_at.strftime("%d.%m.%Y %H:%M"),
              "items": [{"title": i.title, "price": i.price, "quantity": i.quantity} for i in o.items]}
             for o in orders]
 

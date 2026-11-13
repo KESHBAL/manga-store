@@ -134,3 +134,8 @@ input:focus, select:focus, textarea:focus { outline:none; border-color:var(--red
 .role { align-self:center; padding:6px 12px; font-size:13px; font-weight:700; border:2px solid var(--white); color:var(--white); max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .role.guest { opacity:.6; }
 .role.admin, .role.mangaka { background:var(--white); color:var(--red); border-color:var(--red); }
+/* оплата картой */
+#stripeBox { max-width:420px; margin:18px 0 0 auto; }
+.ppNote { font-size:13px; color:#666; text-align:right; margin-bottom:8px; }
+.stripeBtn { width:100%; background:#635bff; margin-top:0; }
+.stripeBtn:hover { background:#4b44d1; }
